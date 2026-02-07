@@ -11,8 +11,8 @@ default = []
 
 # Local engines
 whisper = ["dep:whisper-rs"]
-parakeet = ["dep:ort", "dep:ndarray", "dep:regex", "dep:once_cell"]
-moonshine = ["dep:ort", "dep:ndarray"]
+parakeet = ["dep:ort", "dep:ndarray", "dep:regex", "dep:once_cell", "cuda"]
+moonshine = ["dep:ort", "dep:ndarray", "cuda"]
 whisperfile = ["dep:ureq"]
 
 # Remote engines
@@ -20,6 +20,9 @@ openai = ["dep:async-openai", "dep:tokio", "dep:async-trait"]
 
 # Convenience
 all = ["whisper", "parakeet", "moonshine", "whisperfile", "openai"]
+
+# GPU acceleration
+cuda = []
 
 [dependencies]
 # Always required
@@ -32,7 +35,10 @@ thiserror = "2.0.16"
 derive_builder = { version = "0.20.2" }
 
 # Parakeet & Moonshine (ONNX-based)
-ort = { version = "2.0.0-rc.10", optional = true }
+# Enable CUDA for ort on Windows/Linux for GPU acceleration
+# The 'load-dynamic' feature allows us to use CUDA-enabled ONNX Runtime binaries
+# The 'download-binaries' feature will download prebuilt ONNX Runtime with CUDA support
+ort = { version = "2.0.0-rc.10", optional = true, features = ["cuda", "load-dynamic"] }
 ndarray = { version = "0.16.1", optional = true }
 
 # Parakeet only

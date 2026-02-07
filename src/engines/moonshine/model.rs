@@ -1,4 +1,6 @@
 use ndarray::{Array2, ArrayD};
+#[cfg(feature = "cuda")]
+use ort::execution_providers::CUDAExecutionProvider;
 use ort::execution_providers::CPUExecutionProvider;
 use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
@@ -94,6 +96,17 @@ impl MoonshineModel {
     }
 
     fn init_session(path: &Path) -> Result<Session, MoonshineError> {
+        // Use CUDA execution provider if available, otherwise fall back to CPU
+        #[cfg(feature = "cuda")]
+        {
+            log::info!("Moonshine: Attempting to initialize CUDA execution provider...");
+        }
+        #[cfg(feature = "cuda")]
+        let providers = vec![
+            CUDAExecutionProvider::default().build(),
+            CPUExecutionProvider::default().build(),
+        ];
+        #[cfg(not(feature = "cuda"))]
         let providers = vec![CPUExecutionProvider::default().build()];
 
         let session = Session::builder()?
@@ -101,6 +114,11 @@ impl MoonshineModel {
             .with_execution_providers(providers)?
             .with_parallel_execution(true)?
             .commit_from_file(path)?;
+
+        #[cfg(feature = "cuda")]
+        {
+            log::info!("Moonshine: Session created with CUDA execution provider");
+        }
 
         for input in &session.inputs {
             log::info!(
