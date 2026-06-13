@@ -31,7 +31,13 @@ fn execution_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
         }
         OrtAccelerator::Cuda => {
             #[cfg(feature = "ort-cuda")]
-            eps.push(CUDA::default().with_device_id(get_ort_gpu_device()).build());
+            if cuda_runtime_available() {
+                eps.push(CUDA::default().with_device_id(get_ort_gpu_device()).build());
+            } else {
+                log::warn!(
+                    "Accelerator set to CUDA but the CUDA runtime / cuDNN DLLs were not found; using CPU"
+                );
+            }
             #[cfg(not(feature = "ort-cuda"))]
             log::warn!(
                 "Accelerator set to CUDA but ort-cuda feature is not enabled; falling back to CPU"
@@ -112,7 +118,13 @@ fn execution_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
             #[cfg(feature = "ort-tensorrt")]
             eps.push(TensorRT::default().build());
             #[cfg(feature = "ort-cuda")]
-            eps.push(CUDA::default().with_device_id(get_ort_gpu_device()).build());
+            if cuda_runtime_available() {
+                eps.push(CUDA::default().with_device_id(get_ort_gpu_device()).build());
+            } else {
+                log::info!(
+                    "Auto: CUDA runtime / cuDNN DLLs not found — skipping CUDA EP, using CPU"
+                );
+            }
             #[cfg(feature = "ort-rocm")]
             eps.push(ROCm::default().build());
             // CoreML is safe for Auto on macOS — analogous to CUDA on NVIDIA
@@ -126,6 +138,59 @@ fn execution_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
     // CPU is always the final fallback
     eps.push(CPU::default().build());
     eps
+}
+
+/// Probe whether the CUDA runtime + cuDNN DLLs the ORT CUDA EP needs are loadable.
+///
+/// These are `onnxruntime_providers_cuda.dll`'s own static imports — the version baked
+/// into each soname (`_12`, `_9`, `_11`) is itself the compatibility gate (CUDA 12.x +
+/// cuDNN 9.x; e.g. CUDA 13's `cudart64_13` would not satisfy `cudart64_12`). Probing
+/// here avoids requesting the CUDA EP — and the failed load of the ~324 MB
+/// `providers_cuda.dll` — on machines without the CUDA toolkit / cuDNN, so Parakeet
+/// falls back to CPU cleanly instead of erroring.
+#[cfg(all(feature = "ort-cuda", windows))]
+fn cuda_runtime_available() -> bool {
+    const REQUIRED: &[&str] = &[
+        "cudart64_12.dll",
+        "cublas64_12.dll",
+        "cublasLt64_12.dll",
+        "cufft64_11.dll",
+        "cudnn64_9.dll",
+    ];
+    REQUIRED.iter().all(|n| dll_loadable(n))
+}
+
+/// Non-Windows builds don't gate (the CUDA EP's own init handles missing libs there).
+#[cfg(all(feature = "ort-cuda", not(windows)))]
+fn cuda_runtime_available() -> bool {
+    true
+}
+
+/// Try to load a DLL by name via the process DLL search path, then free it. Returns
+/// true iff the OS loader could resolve it (and its dependencies) — i.e. it's installed
+/// and on PATH. Uses LoadLibraryW directly to avoid a winapi crate dependency.
+#[cfg(all(feature = "ort-cuda", windows))]
+fn dll_loadable(name: &str) -> bool {
+    use std::ffi::OsStr;
+    use std::os::raw::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    extern "system" {
+        fn LoadLibraryW(lp_lib_file_name: *const u16) -> *mut c_void;
+        fn FreeLibrary(h_lib_module: *mut c_void) -> i32;
+    }
+    let wide: Vec<u16> = OsStr::new(name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let handle = LoadLibraryW(wide.as_ptr());
+        if handle.is_null() {
+            false
+        } else {
+            FreeLibrary(handle);
+            true
+        }
+    }
 }
 
 /// Returns true if the selected execution provider requires sequential execution
