@@ -44,6 +44,12 @@ ort-coreml   = ["onnx", "ort/coreml"]
 ort-webgpu   = ["onnx", "ort/webgpu"]
 ort-xnnpack  = ["onnx", "ort/xnnpack"]
 ort-tracing  = ["onnx", "ort/tracing"]
+# Load ONNX Runtime dynamically at runtime (via ORT_DYLIB_PATH) instead of
+# downloading/linking pyke's prebuilt binaries. Required on Windows+CUDA: the
+# downloaded binaries lack sm_120 (Blackwell) kernels, so we ship our own
+# official ORT 1.26 DLLs and point ORT_DYLIB_PATH at them. Enable only on the
+# Windows GPU build so macOS/Linux keep their normal linking.
+ort-load-dynamic = ["onnx", "ort/load-dynamic"]
 ort-accel    = ["ort-cuda", "ort-tensorrt", "ort-directml", "ort-rocm", "ort-coreml", "ort-webgpu", "ort-xnnpack"]
 
 # Convenience

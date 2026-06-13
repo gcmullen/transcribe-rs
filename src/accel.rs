@@ -72,6 +72,23 @@ pub fn get_ort_accelerator() -> OrtAccelerator {
     OrtAccelerator::from_u8(ORT_ACCELERATOR.load(Ordering::Relaxed))
 }
 
+/// ORT GPU device index for the CUDA EP.
+///
+/// `0` (default) is the first device in CUDA's PCI-bus ordering — i.e. the
+/// internal/laptop GPU, since the app sets `CUDA_DEVICE_ORDER=PCI_BUS_ID` at
+/// startup. Override (e.g. to select a discrete card) before loading ORT models.
+static ORT_GPU_DEVICE: AtomicI32 = AtomicI32::new(0);
+
+/// Set the ORT (CUDA EP) GPU device index. Call before loading ORT models.
+pub fn set_ort_gpu_device(device: i32) {
+    ORT_GPU_DEVICE.store(device, Ordering::Relaxed);
+}
+
+/// Get the ORT (CUDA EP) GPU device index (default `0` = internal GPU).
+pub fn get_ort_gpu_device() -> i32 {
+    ORT_GPU_DEVICE.load(Ordering::Relaxed)
+}
+
 impl OrtAccelerator {
     /// Return the list of ORT accelerators that are compiled-in for the current build.
     ///

@@ -118,14 +118,26 @@ impl ParakeetModel {
             blank_idx
         );
 
-        Ok(Self {
+        let mut model = Self {
             encoder,
             decoder_joint,
             preprocessor,
             vocab,
             blank_idx,
             vocab_size,
-        })
+        };
+
+        // Warm up with one dummy inference so the expensive one-time GPU
+        // initialization (CUDA context + cuDNN/kernel JIT — several seconds on the
+        // first run) happens here at load time rather than on the user's first
+        // transcription. Best-effort: a failure must not block model loading.
+        let warmup_samples = vec![0.0f32; 16_000]; // 1s of silence @ 16 kHz
+        match model.transcribe_with(&warmup_samples, &ParakeetParams::default()) {
+            Ok(_) => log::info!("Parakeet warmup inference complete"),
+            Err(e) => log::warn!("Parakeet warmup inference failed (non-fatal): {}", e),
+        }
+
+        Ok(model)
     }
 
     /// Default leading silence in milliseconds.
@@ -367,7 +379,26 @@ impl ParakeetModel {
                 emitted_tokens += 1;
             }
 
-            if token == self.blank_idx || emitted_tokens == MAX_TOKENS_PER_STEP {
+            // TDT: the decoder_joint emits a DURATION head after the vocab logits
+            // (parakeet durations = [0,1,2,3,4], so the argmax index IS the number
+            // of encoder frames to skip). Using it advances multiple frames per step
+            // instead of one — the whole point of TDT, ~3-4x fewer decoder calls.
+            // step <= 0 (RNNT, or duration 0) falls back to the per-frame advance.
+            let step: i64 = if vocab_logits_slice.len() > self.vocab_size {
+                vocab_logits_slice[self.vocab_size..]
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(idx, _)| idx as i64)
+                    .unwrap_or(-1)
+            } else {
+                -1
+            };
+
+            if step > 0 {
+                t += step as usize;
+                emitted_tokens = 0;
+            } else if token == self.blank_idx || emitted_tokens == MAX_TOKENS_PER_STEP {
                 t += 1;
                 emitted_tokens = 0;
             }

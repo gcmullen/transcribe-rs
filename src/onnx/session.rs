@@ -18,7 +18,7 @@ use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use std::path::Path;
 
-use crate::accel::{get_ort_accelerator, OrtAccelerator};
+use crate::accel::{get_ort_accelerator, get_ort_gpu_device, OrtAccelerator};
 
 /// Build the execution provider list based on the global accelerator preference.
 fn execution_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
@@ -31,7 +31,7 @@ fn execution_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
         }
         OrtAccelerator::Cuda => {
             #[cfg(feature = "ort-cuda")]
-            eps.push(CUDA::default().build());
+            eps.push(CUDA::default().with_device_id(get_ort_gpu_device()).build());
             #[cfg(not(feature = "ort-cuda"))]
             log::warn!(
                 "Accelerator set to CUDA but ort-cuda feature is not enabled; falling back to CPU"
@@ -42,7 +42,7 @@ fn execution_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
             {
                 eps.push(TensorRT::default().build());
                 // CUDA as fallback for ops TensorRT doesn't support
-                eps.push(CUDA::default().build());
+                eps.push(CUDA::default().with_device_id(get_ort_gpu_device()).build());
             }
             #[cfg(not(feature = "ort-tensorrt"))]
             log::warn!(
@@ -112,7 +112,7 @@ fn execution_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
             #[cfg(feature = "ort-tensorrt")]
             eps.push(TensorRT::default().build());
             #[cfg(feature = "ort-cuda")]
-            eps.push(CUDA::default().build());
+            eps.push(CUDA::default().with_device_id(get_ort_gpu_device()).build());
             #[cfg(feature = "ort-rocm")]
             eps.push(ROCm::default().build());
             // CoreML is safe for Auto on macOS — analogous to CUDA on NVIDIA
@@ -200,13 +200,34 @@ fn build_session(
 }
 
 /// Create an ONNX session with standard settings.
+///
+/// Uses SEQUENTIAL execution: the CUDA EP performs far better sequentially
+/// (parallel execution causes stream contention and can run the GPU at near-CPU
+/// speed — onnxruntime itself defaults to sequential). CPU engines are unaffected
+/// in practice for these single-input models.
 pub fn create_session(path: &Path) -> Result<Session, ort::Error> {
-    build_session(path, None, true)
+    build_session(path, None, false)
 }
 
 /// Create an ONNX session with configurable thread count.
 pub fn create_session_with_threads(path: &Path, num_threads: usize) -> Result<Session, ort::Error> {
     build_session(path, Some(num_threads), true)
+}
+
+/// Create an ONNX session pinned to the CPU execution provider, ignoring the
+/// global accelerator preference.
+///
+/// Intended for tiny models invoked in a tight autoregressive loop (the TDT
+/// `decoder_joint`), where per-step GPU kernel launch/sync and host<->device
+/// copies dominate — far more than the compute. Running such a loop on CPU
+/// avoids those round-trips entirely and is dramatically faster, while the heavy
+/// encoder still runs on the GPU.
+pub fn create_cpu_session(path: &Path) -> Result<Session, ort::Error> {
+    Session::builder()?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_parallel_execution(true)?
+        .with_execution_providers([CPU::default().build()])?
+        .commit_from_file(path)
 }
 
 /// Resolve a model file path for the requested quantization level.
