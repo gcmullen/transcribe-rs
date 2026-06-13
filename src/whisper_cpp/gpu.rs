@@ -1,8 +1,13 @@
 //! GPU device enumeration and auto-selection for whisper.cpp inference.
 //!
 //! Provides [`list_gpu_devices`] to enumerate available GPUs and
-//! [`auto_select_gpu_device`] to pick the best one automatically
-//! (preferring dedicated GPUs over integrated by total VRAM).
+//! [`auto_select_gpu_device`] to pick the best one automatically.
+//!
+//! Auto-selection priority: CUDA over Vulkan over other backends; dedicated over
+//! integrated; then the lowest device index (the internal / first GPU). With
+//! `CUDA_DEVICE_ORDER=PCI_BUS_ID` set, CUDA device 0 is the internal GPU, so this
+//! matches the Parakeet/ORT convention (internal-first) and avoids an external
+//! display GPU.
 
 use log::info;
 use serde::Serialize;
@@ -28,6 +33,8 @@ pub struct GpuDeviceInfo {
     pub id: i32,
     /// Human-readable device name (e.g. "NVIDIA GeForce RTX 4060").
     pub name: String,
+    /// Backend that owns this device (e.g. "CUDA", "Vulkan", "BLAS").
+    pub backend: String,
     /// Whether this is a dedicated or integrated GPU.
     pub kind: GpuKind,
     /// Total VRAM in bytes.
@@ -77,6 +84,22 @@ pub fn list_gpu_devices() -> Vec<GpuDeviceInfo> {
                 }
             };
 
+            // Backend that owns this device ("CUDA", "Vulkan", …) — used to rank
+            // CUDA over Vulkan in auto-selection.
+            let backend = {
+                let reg = whisper_rs_sys::ggml_backend_dev_backend_reg(dev);
+                if reg.is_null() {
+                    String::new()
+                } else {
+                    let ptr = whisper_rs_sys::ggml_backend_reg_name(reg);
+                    if ptr.is_null() {
+                        String::new()
+                    } else {
+                        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                    }
+                }
+            };
+
             let mut free: usize = 0;
             let mut total: usize = 0;
             whisper_rs_sys::ggml_backend_dev_memory(dev, &mut free, &mut total);
@@ -90,6 +113,7 @@ pub fn list_gpu_devices() -> Vec<GpuDeviceInfo> {
             gpu_devices.push(GpuDeviceInfo {
                 id: gpu_index,
                 name,
+                backend,
                 kind,
                 total_vram: total,
                 free_vram: free,
@@ -102,10 +126,27 @@ pub fn list_gpu_devices() -> Vec<GpuDeviceInfo> {
     }
 }
 
+/// Backend preference rank for auto-selection (lower = preferred): CUDA, then
+/// Vulkan, then anything else.
+fn backend_rank(backend: &str) -> u8 {
+    let b = backend.to_ascii_lowercase();
+    if b.contains("cuda") {
+        0
+    } else if b.contains("vulkan") {
+        1
+    } else {
+        2
+    }
+}
+
 /// Auto-select the best GPU device for whisper inference.
 ///
-/// Prefers dedicated GPUs over integrated, then picks the device with the most
-/// total VRAM as a tiebreaker.
+/// Priority (lowest wins): CUDA > Vulkan > other backend; then dedicated >
+/// integrated; then the lowest device index. Because CUDA device 0 is the internal
+/// GPU (with `CUDA_DEVICE_ORDER=PCI_BUS_ID`), this prefers the internal NVIDIA card
+/// over an external one — the same internal-first rule Parakeet/ORT uses — and only
+/// falls back to Vulkan (other-vendor GPUs) when no CUDA device exists. CPU is
+/// whisper.cpp's own fallback when no GPU is selected.
 ///
 /// Returns `0` if no devices are found or enumeration fails.
 pub fn auto_select_gpu_device() -> i32 {
@@ -116,19 +157,20 @@ pub fn auto_select_gpu_device() -> i32 {
 
     let best = devices
         .iter()
-        .max_by_key(|d| {
-            let kind_priority = match d.kind {
-                GpuKind::Dedicated => 1u8,
-                GpuKind::Integrated => 0,
+        .min_by_key(|d| {
+            let kind_rank = match d.kind {
+                GpuKind::Dedicated => 0u8,
+                GpuKind::Integrated => 1,
             };
-            (kind_priority, d.total_vram)
+            (backend_rank(&d.backend), kind_rank, d.id)
         })
         .unwrap(); // safe: devices is non-empty
 
     info!(
-        "Auto-selected GPU device {} '{}' ({:?}, {} MB VRAM)",
+        "Auto-selected GPU device {} '{}' (backend {}, {:?}, {} MB VRAM) — CUDA/internal-first",
         best.id,
         best.name,
+        best.backend,
         best.kind,
         best.total_vram / (1024 * 1024),
     );
